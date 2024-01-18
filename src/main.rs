@@ -1,11 +1,11 @@
 use std::{fs::File, io::Write};
 
 use aws_config::BehaviorVersion;
+use aws_sdk_s3::primitives::ByteStream;
+use datafusion::arrow::json;
 use lambda_http::{run, service_fn, Body, Error, Request, RequestExt, Response};
 use std::fs;
 use std::path::Path;
-
-use datafusion::arrow::json;
 // use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::prelude::*;
@@ -104,6 +104,37 @@ async fn compute(id: u16) -> Result<(), DataFusionError> {
     for rec in recs {
         writer.write(&rec).expect("Write failed")
     }
+    writer.finish().unwrap();
+    let s3_key = format!("results/result{}.json", id);
+
+    let body = ByteStream::from_path(Path::new(&filename)).await;
+
+    let response = s3_client
+        .put_object()
+        .bucket(bucket_name)
+        .body(body.unwrap())
+        .key(&s3_key)
+        .send()
+        .await;
+
+    match response {
+        Ok(_) => {
+            tracing::info!(
+                filename = %filename,
+                "data successfully stored in S3",
+            );
+            // Return `Response` (it will be serialized to JSON automatically by the runtime)
+        }
+        Err(err) => {
+            // In case of failure, log a detailed error to CloudWatch.
+            tracing::error!(
+                err = %err,
+                filename = %filename,
+                "failed to upload data to S3"
+            );
+        }
+    }
+
     let end = Instant::now();
     tracing::info!(
         "Finished executing for task {} in time {:?}",
