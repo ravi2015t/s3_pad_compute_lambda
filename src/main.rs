@@ -95,16 +95,22 @@ async fn compute(id: u16) -> Result<(), DataFusionError> {
     let df = ctx.sql(&sql_query).await?;
 
     let filename = format!("/tmp/result{}.json", id);
-    let path = Path::new(&filename);
-    let file = fs::File::create(path)?;
 
-    let mut writer = json::LineDelimitedWriter::new(file);
+    df.write_json(&filename)
+        .await
+        .expect("Failed to write Json file");
 
-    let recs = df.collect().await?;
-    for rec in recs {
-        writer.write(&rec).expect("Write failed")
-    }
-    writer.finish().unwrap();
+    // let path = Path::new(&filename);
+    // let file = fs::File::create(path)?;
+
+    // let mut writer = json::LineDelimitedWriter::new(file);
+
+    // let recs = df.collect().await?;
+    // for rec in recs {
+    //     writer.write(&rec).expect("Write failed")
+    // }
+    // writer.finish().unwrap();
+
     let s3_key = format!("results/result{}.json", id);
 
     let body = ByteStream::from_path(Path::new(&filename)).await;
