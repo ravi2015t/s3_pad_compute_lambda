@@ -1,22 +1,23 @@
-use std::{fs::File, io::Write};
-
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::primitives::ByteStream;
 use datafusion::arrow::json;
-use lambda_http::{run, service_fn, Body, Error, Request, RequestExt, Response};
+use lambda_http::{run, service_fn, Body, Error, Request, Response};
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
+use url::Url;
 // use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::prelude::*;
 // use env_logger::Env;
+use object_store::aws::AmazonS3Builder;
 use tokio::time::Instant;
 
 /// This is the main body for the function.
 /// Write your code inside it.
 /// There are some code example in the following URLs:
 /// - https://github.com/awslabs/aws-lambda-rust-runtime/tree/main/examples
-async fn function_handler(event: Request) -> Result<Response<Body>, Error> {
+async fn function_handler(_event: Request) -> Result<Response<Body>, Error> {
     let mut query_tasks = Vec::new();
     let num_requests = 100;
 
@@ -44,43 +45,22 @@ async fn compute(id: u16) -> Result<(), DataFusionError> {
 
     let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
     let s3_client = aws_sdk_s3::Client::new(&config);
+    let s3 = AmazonS3Builder::from_env()
+        .with_bucket_name(bucket_name)
+        .build()
+        .expect("Failed to initialize s3");
 
-    let mut file =
-        File::create(format!("/tmp/input{}.parquet", id)).expect("Failed to create result file");
-
-    let mut object = s3_client
-        .get_object()
-        .bucket(bucket_name)
-        .key(format!("part_account/{}/pa_detail.parquet", id))
-        .send()
-        .await
-        .expect("Failed to get the object from S3");
-
-    let mut byte_count = 0_usize;
-
-    while let Some(bytes) = object
-        .body
-        .try_next()
-        .await
-        .expect("Failed to get next bytes from S3")
-    {
-        let bytes_len = bytes.len();
-        file.write_all(&bytes).expect("Failed to write data");
-        byte_count = bytes_len;
-    }
-
-    tracing::info!("Wrote {byte_count} bytes");
+    let s3_path = format!("s3://{bucket_name}");
+    let s3_url = Url::parse(&s3_path).unwrap();
     // create local session context
     let ctx = SessionContext::new();
 
-    ctx.register_parquet(
-        &format!("pad{}", id),
-        &format!("/tmp/input{}.parquet", id),
-        ParquetReadOptions::default(),
-    )
-    .await
-    .expect("Failed to register parquet file");
-
+    let file_name = format!("part_account/{id}/pa_detail.parquet");
+    ctx.runtime_env()
+        .register_object_store(&s3_url, Arc::new(s3));
+    let path = format!("s3://{bucket_name}/{file_name}");
+    ctx.register_parquet(&format!("pad{id}"), &path, ParquetReadOptions::default())
+        .await?;
     let query = (1..=48)
         .map(|i| format!("amount{}", i))
         .map(|column_name| format!("SUM({}) as {}", column_name, column_name))
@@ -95,10 +75,6 @@ async fn compute(id: u16) -> Result<(), DataFusionError> {
     let df = ctx.sql(&sql_query).await?;
 
     let filename = format!("/tmp/result{}.json", id);
-
-    // df.write_json(&filename)
-    //     .await
-    //     .expect("Failed to write Json file");
 
     let path = Path::new(&filename);
     let file = fs::File::create(path)?;
